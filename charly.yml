@@ -91,12 +91,29 @@ kubevirt-operator:
                   /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=300s deployment/virt-operator
               run_as: root
               context: [deploy]
-            - run: apply the KubeVirt CR, then wait for the KubeVirt control plane to report Deployed
+            - run: apply the KubeVirt CR, then wait for the KubeVirt control plane (the operator reconciles virt-api / virt-controller / virt-handler ASYNCHRONOUSLY after the CR — wait for each to EXIST first, then for its rollout, bounded)
               id: kubevirt-cr-apply
               command: |
                   set -euo pipefail
                   export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
                   /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-cr.yaml
+                  # The operator creates the control-plane workloads after the CR; wait for
+                  # each object to EXIST before waiting on its rollout (a one-shot wait on a
+                  # not-yet-created Deployment errors "NotFound").
+                  wait_for() { # kind name timeout
+                    local kind="$1" name="$2" timeout="$3" deadline
+                    deadline=$(( $(date +%s) + timeout ))
+                    until /usr/local/bin/kubectl -n kubevirt get "$kind" "$name" >/dev/null 2>&1; do
+                      if [ "$(date +%s)" -ge "$deadline" ]; then
+                        echo "kubevirt $kind/$name did not appear within ${timeout}s" >&2
+                        return 1
+                      fi
+                      sleep 2
+                    done
+                  }
+                  wait_for deployment virt-api 300
+                  wait_for deployment virt-controller 300
+                  wait_for daemonset virt-handler 420
                   /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-api
                   /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-controller
                   /usr/local/bin/kubectl -n kubevirt rollout status --timeout=600s daemonset/virt-handler
@@ -111,12 +128,20 @@ kubevirt-operator:
                   /usr/local/bin/kubectl -n cdi wait --for=condition=Available --timeout=300s deployment/cdi-operator
               run_as: root
               context: [deploy]
-            - run: apply the CDI CR, then wait for the CDI control plane to report Available
+            - run: apply the CDI CR, then wait for the CDI control plane (the operator reconciles cdi-apiserver asynchronously — wait for EXISTENCE, then rollout, bounded)
               id: cdi-cr-apply
               command: |
                   set -euo pipefail
                   export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
                   /usr/local/bin/kubectl apply -f /var/lib/charly/cdi-cr.yaml
+                  deadline=$(( $(date +%s) + 600 ))
+                  until /usr/local/bin/kubectl -n cdi get deployment cdi-apiserver >/dev/null 2>&1; do
+                    if [ "$(date +%s)" -ge "$deadline" ]; then
+                      echo "cdi deployment/cdi-apiserver did not appear within 600s" >&2
+                      exit 1
+                    fi
+                    sleep 2
+                  done
                   /usr/local/bin/kubectl -n cdi wait --for=condition=Available --timeout=600s deployment/cdi-apiserver
               run_as: root
               context: [deploy]
