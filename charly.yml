@@ -1,0 +1,95 @@
+# layer-kubevirt-operator — the KubeVirt + CDI platform install.
+#
+# Applies the pinned KubeVirt operator + CR (virt-operator / virt-api /
+# virt-controller / virt-handler) and the CDI operator + CR
+# (containerized-data-importer, for DataVolume imports) to a Kubernetes cluster,
+# then waits for the KubeVirt CR to report Deployed.
+#
+# This candy is the PLATFORM leg of the kubevirt integration: it runs in a venue
+# that ALREADY has a cluster reachable via kubeconfig (a k3s-server VM, a
+# kindcluster, or a `target: kubernetes` host). It downloads the pinned release
+# manifests and applies them with the `kube:` verb (candy/plugin-kube), then
+# asserts readiness with the `kubevirt:` verb (candy/plugin-kubevirt).
+#
+# Standalone repo (the candy de-submodule cutover, kind-prefixed naming).
+version: 2026.261.1747
+kubevirt-operator:
+    candy:
+        version: 2026.269.0040
+        description: |
+            KubeVirt + CDI operator install on a Kubernetes cluster.
+            Downloads the pinned kubevirt-operator.yaml + kubevirt-cr.yaml and the
+            cdi-operator.yaml + cdi-cr.yaml release manifests, applies them with the
+            `kube:` verb, then waits for the KubeVirt CR to report Deployed. KubeVirt
+            turns a Kubernetes cluster into a virtualization platform (VirtualMachine /
+            VirtualMachineInstance CRDs, virt-launcher pods); CDI adds DataVolumes for
+            importing VM disk images. The install path uses only existing charly verbs
+            (`kube:` apply + the `kubevirt:` wait-ready probe) — the manifests are
+            pinned by release version, so the cluster converges to a known state.
+        var:
+            KUBEVIRT_VERSION: v1.9.0
+            CDI_VERSION: v1.66.1
+        plan:
+            - run: download the pinned KubeVirt operator manifest
+              id: kubevirt-operator-fetch
+              download: "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
+              extract: none
+              to: /var/lib/charly/kubevirt-operator.yaml
+              mode: "0644"
+              run_as: root
+              unless_exists: /var/lib/charly/kubevirt-operator.yaml
+            - run: download the pinned KubeVirt CR manifest
+              id: kubevirt-cr-fetch
+              download: "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
+              extract: none
+              to: /var/lib/charly/kubevirt-cr.yaml
+              mode: "0644"
+              run_as: root
+              unless_exists: /var/lib/charly/kubevirt-cr.yaml
+            - run: apply the KubeVirt operator manifest (creates the KubeVirt CRDs + the virt-operator Deployment)
+              id: kubevirt-operator-apply
+              kube:
+                method: apply
+                manifest: /var/lib/charly/kubevirt-operator.yaml
+              context: [runtime]
+            - run: apply the KubeVirt CR (the operator reconciles virt-api, virt-controller, and the virt-handler DaemonSet)
+              id: kubevirt-cr-apply
+              kube:
+                method: apply
+                manifest: /var/lib/charly/kubevirt-cr.yaml
+              context: [runtime]
+            - check: the KubeVirt CR reports the Deployed phase (the operator finished reconciling)
+              id: kubevirt-cr-ready
+              kubevirt:
+                method: wait-ready
+              timeout: "600s"
+              context: [runtime]
+            - run: download the pinned CDI operator manifest
+              id: cdi-operator-fetch
+              download: "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
+              extract: none
+              to: /var/lib/charly/cdi-operator.yaml
+              mode: "0644"
+              run_as: root
+              unless_exists: /var/lib/charly/cdi-operator.yaml
+            - run: download the pinned CDI CR manifest
+              id: cdi-cr-fetch
+              download: "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
+              extract: none
+              to: /var/lib/charly/cdi-cr.yaml
+              mode: "0644"
+              run_as: root
+              unless_exists: /var/lib/charly/cdi-cr.yaml
+            - run: apply the CDI operator manifest (DataVolumes for VM image import)
+              id: cdi-operator-apply
+              kube:
+                method: apply
+                manifest: /var/lib/charly/cdi-operator.yaml
+              context: [runtime]
+            - run: apply the CDI CR
+              id: cdi-cr-apply
+              kube:
+                method: apply
+                manifest: /var/lib/charly/cdi-cr.yaml
+              context: [runtime]
+            - agent-check: with KubeVirt installed, a VirtualMachine CR on this cluster schedules a virt-launcher pod that boots a KVM guest — the platform can run charly VMs (the deploy:kubevirt substrate)
