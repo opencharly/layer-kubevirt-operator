@@ -16,6 +16,13 @@
 # probe lives in the BED's own plan (which CAN name its own per-deploy
 # `kind: kubernetes` profile), never here.
 #
+# VENUE TOOLING (R9): the in-venue steps shell the venue's OWN Kubernetes client
+# (`/usr/local/bin/kubectl` — the k3s-server guest's bundled kubectl, exactly what
+# candy/layer-helm-chart uses) and `curl` (base). This candy does NOT install a
+# cluster or a client: it operates on the venue's EXISTING cluster, so both are
+# provided by the venue (k3s-server / the base image), not declared as install deps.
+# The consuming bed composes k3s-server, which provides kubectl.
+#
 # Standalone repo (the candy de-submodule cutover, kind-prefixed naming).
 version: 2026.261.1747
 kubevirt-operator:
