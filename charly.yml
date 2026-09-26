@@ -5,91 +5,162 @@
 # (containerized-data-importer, for DataVolume imports) to a Kubernetes cluster,
 # then waits for the KubeVirt CR to report Deployed.
 #
-# This candy is the PLATFORM leg of the kubevirt integration: it runs in a venue
-# that ALREADY has a cluster reachable via kubeconfig (a k3s-server VM, a
-# kindcluster, or a `target: kubernetes` host). It downloads the pinned release
-# manifests and applies them with the `kube:` verb (candy/plugin-kube), then
-# asserts readiness with the `kubevirt:` verb (candy/plugin-kubevirt).
+# VENUE: the applies run IN-VENUE, exactly like candy/layer-helm-chart's install —
+# against the venue's OWN kubeconfig (`/etc/rancher/k3s/k3s.yaml` for a k3s-server
+# guest). This is the correct binding for the k3s-VM R10 beds: the cluster is a
+# k3s-server guest whose kubeconfig is reachable IN THE GUEST, and a `kube:` verb is
+# HOST-side (it would need the host to carry the merged, port-forwarded kubeconfig,
+# which a composed candy cannot name without coupling to a bed's profile). Running
+# in-venue means the candy works composed into ANY k3s-server venue with no profile
+# coupling — the same reason helm-chart does it. The host-side `kubevirt:` readiness
+# probe lives in the BED's own plan (which CAN name its own per-deploy
+# `kind: kubernetes` profile), never here.
+#
+# VENUE TOOLING (R9): the in-venue steps shell the venue's OWN Kubernetes client
+# (`/usr/local/bin/kubectl` — the k3s-server guest's bundled kubectl, exactly what
+# candy/layer-helm-chart uses) and `curl` (base). This candy does NOT install a
+# cluster or a client: it operates on the venue's EXISTING cluster, so both are
+# provided by the venue (k3s-server / the base image), not declared as install deps.
+# The consuming bed composes k3s-server, which provides kubectl.
 #
 # Standalone repo (the candy de-submodule cutover, kind-prefixed naming).
 version: 2026.261.1747
 kubevirt-operator:
     candy:
-        version: 2026.269.0040
+        version: 2026.269.0100
         description: |
-            KubeVirt + CDI operator install on a Kubernetes cluster.
+            KubeVirt + CDI operator install on a Kubernetes cluster, IN-VENUE.
             Downloads the pinned kubevirt-operator.yaml + kubevirt-cr.yaml and the
-            cdi-operator.yaml + cdi-cr.yaml release manifests, applies them with the
-            `kube:` verb, then waits for the KubeVirt CR to report Deployed. KubeVirt
-            turns a Kubernetes cluster into a virtualization platform (VirtualMachine /
-            VirtualMachineInstance CRDs, virt-launcher pods); CDI adds DataVolumes for
-            importing VM disk images. The install path uses only existing charly verbs
-            (`kube:` apply + the `kubevirt:` wait-ready probe) — the manifests are
-            pinned by release version, so the cluster converges to a known state.
+            cdi-operator.yaml + cdi-cr.yaml release manifests into the venue, then
+            applies them with the venue's OWN kubectl against its OWN kubeconfig
+            (KUBECONFIG=/etc/rancher/k3s/k3s.yaml for a k3s-server guest) and waits
+            for the KubeVirt CR to report Deployed. KubeVirt turns a Kubernetes
+            cluster into a virtualization platform (VirtualMachine /
+            VirtualMachineInstance CRDs, virt-launcher pods); CDI adds DataVolumes
+            for importing VM disk images. The applies run in-venue (the helm-chart
+            precedent) so the candy composes into any k3s-server venue with no
+            host-side cluster-profile coupling; the host-side `kubevirt:` readiness
+            probe is the bed's own plan step.
         var:
             KUBEVIRT_VERSION: v1.9.0
             CDI_VERSION: v1.66.1
+            # KUBECONFIG_IN_VENUE is the venue's own kubeconfig. A k3s-server guest
+            # carries /etc/rancher/k3s/k3s.yaml; a host-installed cluster may point
+            # elsewhere via the composed deploy's env:. Default matches k3s.
+            KUBECONFIG_IN_VENUE: /etc/rancher/k3s/k3s.yaml
         plan:
-            - run: download the pinned KubeVirt operator manifest
-              id: kubevirt-operator-fetch
-              download: "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
-              extract: none
-              to: /var/lib/charly/kubevirt-operator.yaml
-              mode: "0644"
+            - run: wait for the k3s API server AND a Ready node IN-VENUE before any apply (the kubeconfig lands when k3s's apiserver starts, and the node registers moments later — the k3s-kernel candy may also reboot the guest; poll bounded, the helm-chart precedent, never a one-shot wait that errors on an empty node list)
+              id: kubevirt-apiserver-ready
+              command: |
+                  set -euo pipefail
+                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
+                  deadline=$(( $(date +%s) + 420 ))
+                  until [ -s "${KUBECONFIG_IN_VENUE}" ] \
+                        && /usr/local/bin/kubectl get --raw /readyz >/dev/null 2>&1 \
+                        && [ "$(/usr/local/bin/kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ')" -ge 1 ]; do
+                    if [ "$(date +%s)" -ge "$deadline" ]; then
+                      echo "k3s apiserver/node did not become ready within 420s" >&2
+                      /usr/local/bin/kubectl get nodes -o wide 2>&1 || true
+                      exit 1
+                    fi
+                    sleep 2
+                  done
               run_as: root
-              unless_exists: /var/lib/charly/kubevirt-operator.yaml
-            - run: download the pinned KubeVirt CR manifest
-              id: kubevirt-cr-fetch
-              download: "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
-              extract: none
-              to: /var/lib/charly/kubevirt-cr.yaml
-              mode: "0644"
+              context: [deploy]
+            - run: download the pinned KubeVirt operator + CR manifests into the venue
+              id: kubevirt-manifests-fetch
+              command: |
+                  set -euo pipefail
+                  mkdir -p /var/lib/charly
+                  base="https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}"
+                  for f in kubevirt-operator.yaml kubevirt-cr.yaml; do
+                    [ -s "/var/lib/charly/$f" ] || curl -fsSL -o "/var/lib/charly/$f" "$base/$f"
+                  done
               run_as: root
-              unless_exists: /var/lib/charly/kubevirt-cr.yaml
-            - run: apply the KubeVirt operator manifest (creates the KubeVirt CRDs + the virt-operator Deployment)
+              context: [deploy]
+            - run: download the pinned CDI operator + CR manifests into the venue
+              id: cdi-manifests-fetch
+              command: |
+                  set -euo pipefail
+                  mkdir -p /var/lib/charly
+                  base="https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}"
+                  for f in cdi-operator.yaml cdi-cr.yaml; do
+                    [ -s "/var/lib/charly/$f" ] || curl -fsSL -o "/var/lib/charly/$f" "$base/$f"
+                  done
+              run_as: root
+              context: [deploy]
+            - run: apply the KubeVirt operator manifest against the venue's own kubeconfig, then wait for the operator rollout
               id: kubevirt-operator-apply
-              kube:
-                method: apply
-                manifest: /var/lib/charly/kubevirt-operator.yaml
-              context: [runtime]
-            - run: apply the KubeVirt CR (the operator reconciles virt-api, virt-controller, and the virt-handler DaemonSet)
+              command: |
+                  set -euo pipefail
+                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
+                  /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-operator.yaml
+                  /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=300s deployment/virt-operator
+              run_as: root
+              context: [deploy]
+            - run: apply the KubeVirt CR, then wait for the KubeVirt control plane (the operator reconciles virt-api / virt-controller / virt-handler ASYNCHRONOUSLY after the CR — wait for each to EXIST first, then for its rollout, bounded)
               id: kubevirt-cr-apply
-              kube:
-                method: apply
-                manifest: /var/lib/charly/kubevirt-cr.yaml
-              context: [runtime]
-            - check: the KubeVirt CR reports the Deployed phase (the operator finished reconciling)
-              id: kubevirt-cr-ready
-              kubevirt:
-                method: wait-ready
-              timeout: "600s"
-              context: [runtime]
-            - run: download the pinned CDI operator manifest
-              id: cdi-operator-fetch
-              download: "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
-              extract: none
-              to: /var/lib/charly/cdi-operator.yaml
-              mode: "0644"
+              command: |
+                  set -euo pipefail
+                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
+                  /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-cr.yaml
+                  # The operator creates the control-plane workloads after the CR; wait for
+                  # each object to EXIST before waiting on its rollout (a one-shot wait on a
+                  # not-yet-created Deployment errors "NotFound").
+                  wait_for() { # kind name timeout
+                    local kind="$1" name="$2" timeout="$3" deadline
+                    deadline=$(( $(date +%s) + timeout ))
+                    until /usr/local/bin/kubectl -n kubevirt get "$kind" "$name" >/dev/null 2>&1; do
+                      if [ "$(date +%s)" -ge "$deadline" ]; then
+                        echo "kubevirt $kind/$name did not appear within ${timeout}s" >&2
+                        return 1
+                      fi
+                      sleep 2
+                    done
+                  }
+                  wait_for deployment virt-api 300
+                  wait_for deployment virt-controller 300
+                  wait_for daemonset virt-handler 420
+                  /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-api
+                  /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-controller
+                  /usr/local/bin/kubectl -n kubevirt rollout status --timeout=600s daemonset/virt-handler
               run_as: root
-              unless_exists: /var/lib/charly/cdi-operator.yaml
-            - run: download the pinned CDI CR manifest
-              id: cdi-cr-fetch
-              download: "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
-              extract: none
-              to: /var/lib/charly/cdi-cr.yaml
-              mode: "0644"
-              run_as: root
-              unless_exists: /var/lib/charly/cdi-cr.yaml
+              context: [deploy]
             - run: apply the CDI operator manifest (DataVolumes for VM image import)
               id: cdi-operator-apply
-              kube:
-                method: apply
-                manifest: /var/lib/charly/cdi-operator.yaml
-              context: [runtime]
-            - run: apply the CDI CR
+              command: |
+                  set -euo pipefail
+                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
+                  /usr/local/bin/kubectl apply -f /var/lib/charly/cdi-operator.yaml
+                  /usr/local/bin/kubectl -n cdi wait --for=condition=Available --timeout=300s deployment/cdi-operator
+              run_as: root
+              context: [deploy]
+            - run: apply the CDI CR, then wait for the CDI control plane (the operator reconciles cdi-apiserver asynchronously — wait for EXISTENCE, then rollout, bounded)
               id: cdi-cr-apply
-              kube:
-                method: apply
-                manifest: /var/lib/charly/cdi-cr.yaml
+              command: |
+                  set -euo pipefail
+                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
+                  /usr/local/bin/kubectl apply -f /var/lib/charly/cdi-cr.yaml
+                  deadline=$(( $(date +%s) + 600 ))
+                  until /usr/local/bin/kubectl -n cdi get deployment cdi-apiserver >/dev/null 2>&1; do
+                    if [ "$(date +%s)" -ge "$deadline" ]; then
+                      echo "cdi deployment/cdi-apiserver did not appear within 600s" >&2
+                      exit 1
+                    fi
+                    sleep 2
+                  done
+                  /usr/local/bin/kubectl -n cdi wait --for=condition=Available --timeout=600s deployment/cdi-apiserver
+              run_as: root
+              context: [deploy]
+            # ADE: the candy that installs the platform also asserts it is present
+            # in the venue's cluster (R3 — the host-side `kubevirt:` readiness probe
+            # is the bed's own plan step, which can name its per-deploy profile).
+            - check: the KubeVirt CRD is registered and the KubeVirt control-plane pods are running in the venue
+              id: kubevirt-installed
+              command: |
+                  set -euo pipefail
+                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
+                  /usr/local/bin/kubectl get crd virtualmachines.kubevirt.io >/dev/null
+                  /usr/local/bin/kubectl -n kubevirt get pods --no-headers | grep -q virt-api
+              run_as: root
               context: [runtime]
-            - agent-check: with KubeVirt installed, a VirtualMachine CR on this cluster schedules a virt-launcher pod that boots a KVM guest — the platform can run charly VMs (the deploy:kubevirt substrate)
