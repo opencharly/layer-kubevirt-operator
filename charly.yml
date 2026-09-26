@@ -42,20 +42,22 @@ kubevirt-operator:
             # elsewhere via the composed deploy's env:. Default matches k3s.
             KUBECONFIG_IN_VENUE: /etc/rancher/k3s/k3s.yaml
         plan:
-            - run: wait for the k3s API server to be reachable IN-VENUE before any apply (the kubeconfig lands when k3s's apiserver starts, seconds-to-minutes after the service; the helm-chart precedent polls /readyz, no sleeps)
+            - run: wait for the k3s API server AND a Ready node IN-VENUE before any apply (the kubeconfig lands when k3s's apiserver starts, and the node registers moments later — the k3s-kernel candy may also reboot the guest; poll bounded, the helm-chart precedent, never a one-shot wait that errors on an empty node list)
               id: kubevirt-apiserver-ready
               command: |
                   set -euo pipefail
                   export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
-                  deadline=$(( $(date +%s) + 300 ))
-                  until [ -s "${KUBECONFIG_IN_VENUE}" ] && /usr/local/bin/kubectl get --raw /readyz >/dev/null 2>&1; do
+                  deadline=$(( $(date +%s) + 420 ))
+                  until [ -s "${KUBECONFIG_IN_VENUE}" ] \
+                        && /usr/local/bin/kubectl get --raw /readyz >/dev/null 2>&1 \
+                        && [ "$(/usr/local/bin/kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ')" -ge 1 ]; do
                     if [ "$(date +%s)" -ge "$deadline" ]; then
-                      echo "k3s apiserver did not become ready within 300s" >&2
+                      echo "k3s apiserver/node did not become ready within 420s" >&2
+                      /usr/local/bin/kubectl get nodes -o wide 2>&1 || true
                       exit 1
                     fi
-                    sleep 1
+                    sleep 2
                   done
-                  /usr/local/bin/kubectl wait --for=condition=Ready node --all --timeout=300s
               run_as: root
               context: [deploy]
             - run: download the pinned KubeVirt operator + CR manifests into the venue
