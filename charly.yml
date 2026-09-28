@@ -24,10 +24,8 @@
 # The consuming bed composes k3s-server, which provides kubectl.
 #
 # Standalone repo (the candy de-submodule cutover, kind-prefixed naming).
-version: 2026.261.1747
 kubevirt-operator:
     candy:
-        version: 2026.269.0100
         description: |
             KubeVirt + CDI operator install on a Kubernetes cluster, IN-VENUE.
             Downloads the pinned kubevirt-operator.yaml + kubevirt-cr.yaml and the
@@ -104,6 +102,7 @@ kubevirt-operator:
                   set -euo pipefail
                   export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
                   /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-cr.yaml
+<<<<<<< HEAD
                   # KubeVirt v1.9 enables ALL Beta feature gates by default, including
                   # `ImageVolume` (upstream kubevirt#17405). On a cluster without the k8s
                   # ImageVolume feature (k3s < 1.35) ImageVolume's code path execs KubeVirt's
