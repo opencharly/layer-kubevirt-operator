@@ -24,10 +24,8 @@
 # The consuming bed composes k3s-server, which provides kubectl.
 #
 # Standalone repo (the candy de-submodule cutover, kind-prefixed naming).
-version: 2026.261.1747
 kubevirt-operator:
     candy:
-        version: 2026.269.0100
         description: |
             KubeVirt + CDI operator install on a Kubernetes cluster, IN-VENUE.
             Downloads the pinned kubevirt-operator.yaml + kubevirt-cr.yaml and the
