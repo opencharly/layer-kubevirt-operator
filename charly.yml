@@ -102,7 +102,6 @@ kubevirt-operator:
                   set -euo pipefail
                   export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
                   /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-cr.yaml
-<<<<<<< HEAD
                   # KubeVirt v1.9 enables ALL Beta feature gates by default, including
                   # `ImageVolume` (upstream kubevirt#17405). On a cluster without the k8s
                   # ImageVolume feature (k3s < 1.35) ImageVolume's code path execs KubeVirt's
