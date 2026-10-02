@@ -5,24 +5,45 @@
 # (containerized-data-importer, for DataVolume imports) to a Kubernetes cluster,
 # then waits for the KubeVirt CR to report Deployed.
 #
-# VENUE: the applies run IN-VENUE, exactly like candy/layer-helm-chart's install —
-# against the venue's OWN kubeconfig (`/etc/rancher/k3s/k3s.yaml` for a k3s-server
-# guest). This is the correct binding for the k3s-VM R10 beds: the cluster is a
-# k3s-server guest whose kubeconfig is reachable IN THE GUEST, and a `kube:` verb is
-# HOST-side (it would need the host to carry the merged, port-forwarded kubeconfig,
-# which a composed candy cannot name without coupling to a bed's profile). Running
-# in-venue means the candy works composed into ANY k3s-server venue with no profile
-# coupling — the same reason helm-chart does it. The host-side `kubevirt:` readiness
-# probe lives in the BED's own plan (which CAN name its own per-deploy
-# `kind: kubernetes` profile), never here.
+# VENUE: the applies run IN-VENUE, exactly like candy/layer-helm-chart's install.
+# This candy installs no cluster and no client — the venue provides both — and it
+# serves TWO venue shapes with one recipe:
 #
-# VENUE TOOLING (R9): the in-venue steps shell the venue's OWN Kubernetes client
-# (`/usr/local/bin/kubectl` — the k3s-server guest's bundled kubectl, exactly what
-# candy/layer-helm-chart uses) and `curl` (base). This candy does NOT install a
-# cluster or a client: it operates on the venue's EXISTING cluster, so both are
-# provided by the venue (k3s-server / the base image), not declared as install deps.
-# The consuming bed composes k3s-server, which provides kubectl.
+#   * a k3s-server GUEST (the R10 bed): the cluster IS the venue, whose own
+#     kubeconfig is /etc/rancher/k3s/k3s.yaml and whose bundled client is
+#     /usr/local/bin/kubectl. In-venue is the only binding that works here: a
+#     `kube:` verb is HOST-side and would need the host to carry the merged,
+#     port-forwarded kubeconfig, which a composed candy cannot name without coupling
+#     to a bed's profile.
+#   * a HOST venue reaching an EXTERNALLY-MANAGED cluster (OVH / GKE / EKS / AKS) —
+#     a `target: local` deploy of this candy on the operator's workstation, which
+#     already holds that cluster's kubeconfig. There is no in-guest cluster at all,
+#     so the venue's ambient kubeconfig ($KUBECONFIG → ~/.kube/config) is the file.
 #
+# The venue's client and kubeconfig are therefore RESOLVED, not assumed (see
+# kubevirt-venue-env): KUBECTL_IN_VENUE → the first `kubectl` on PATH, and
+# KUBECONFIG_IN_VENUE → $KUBECONFIG → ~/.kube/config, each arm explicit and the
+# whole chain failing loudly. The former hardcoded /usr/local/bin/kubectl made the
+# host venue impossible to serve at all.
+#
+# EXTERNAL-CLUSTER NODE PLACEMENT (measured on opencharly/…, OVH `quant-dev`,
+# Kubernetes v1.35.2, whose nodes carry NO node-role.kubernetes.io/* label at all).
+# KubeVirt's operator injects a REQUIRED nodeAffinity — `node-role.kubernetes.io/
+# control-plane` OR `/master` must EXIST — in two independent places, and neither is
+# satisfiable on an externally-managed cluster:
+#   1. the virt-operator Deployment in kubevirt-operator.yaml (a static manifest), so
+#      virt-operator itself stays Pending forever; and
+#   2. the operator's own install-strategy Job, via
+#      placement.InjectPlacementMetadata(infraPlacement, …, RequireControlPlanePreferNonWorker)
+#      (kubevirt v1.9.0 pkg/virt-operator/strategy_job.go:113, placement.go:41-92), which
+#      applies that default ONLY while the CR's `spec.infra.nodePlacement` is unset —
+#      so the whole control plane never reconciles and the CR sits in `Deploying`.
+# The fix is a config-level one in both places, applied only when the cluster exposes
+# no such node (on a cluster that has one, upstream behaviour is left untouched):
+#   1. strip the required block from the fetched manifest; and
+#   2. write spec.infra.nodePlacement into the applied CR (KUBEVIRT_INFRA_NODE_SELECTOR),
+#      then reconcile the install-strategy Job the operator already created under the
+#      upstream default — a Job's pod template is immutable, so it must be recreated.
 # Standalone repo (the candy de-submodule cutover, kind-prefixed naming).
 kubevirt-operator:
     candy:
@@ -30,39 +51,119 @@ kubevirt-operator:
             KubeVirt + CDI operator install on a Kubernetes cluster, IN-VENUE.
             Downloads the pinned kubevirt-operator.yaml + kubevirt-cr.yaml and the
             cdi-operator.yaml + cdi-cr.yaml release manifests into the venue, then
-            applies them with the venue's OWN kubectl against its OWN kubeconfig
-            (KUBECONFIG=/etc/rancher/k3s/k3s.yaml for a k3s-server guest) and waits
-            for the KubeVirt CR to report Deployed. KubeVirt turns a Kubernetes
-            cluster into a virtualization platform (VirtualMachine /
-            VirtualMachineInstance CRDs, virt-launcher pods); CDI adds DataVolumes
-            for importing VM disk images. The applies run in-venue (the helm-chart
-            precedent) so the candy composes into any k3s-server venue with no
-            host-side cluster-profile coupling; the host-side `kubevirt:` readiness
-            probe is the bed's own plan step.
+            applies them with the venue's OWN kubectl against the venue's OWN
+            kubeconfig and waits for the KubeVirt CR to report Deployed. KubeVirt
+            turns a Kubernetes cluster into a virtualization platform
+            (VirtualMachine / VirtualMachineInstance CRDs, virt-launcher pods); CDI
+            adds DataVolumes for importing VM disk images. The venue's client and
+            kubeconfig are resolved (KUBECTL_IN_VENUE or PATH; KUBECONFIG_IN_VENUE,
+            else $KUBECONFIG, else ~/.kube/config), so the candy serves both a
+            k3s-server guest — where the cluster is the venue — and a host venue
+            reaching an externally-managed cluster. On a cluster whose nodes carry no
+            control-plane/master role label (every managed cluster), the install also
+            normalizes the two places KubeVirt requires that label (the virt-operator
+            Deployment and the operator's install-strategy Job, through the CR's
+            spec.infra.nodePlacement), which are otherwise unsatisfiable and leave the
+            platform permanently Pending.
         var:
             KUBEVIRT_VERSION: v1.9.0
             CDI_VERSION: v1.66.1
-            # KUBECONFIG_IN_VENUE is the venue's own kubeconfig. A k3s-server guest
-            # carries /etc/rancher/k3s/k3s.yaml; a host-installed cluster may point
-            # elsewhere via the composed deploy's env:. Default matches k3s.
+            # KUBECONFIG_IN_VENUE is the kubeconfig file the applies use. The default
+            # is the k3s-server guest's own file; a host venue reaching an
+            # externally-managed cluster points here (or leaves it to the venue's
+            # ambient $KUBECONFIG / ~/.kube/config) via the composed deploy's env:.
             KUBECONFIG_IN_VENUE: /etc/rancher/k3s/k3s.yaml
+            # KUBECTL_IN_VENUE is the Kubernetes client the applies use. Empty → the
+            # first `kubectl` on the venue's PATH (a k3s-server guest ships
+            # /usr/local/bin/kubectl; a workstation installs kubectl normally).
+            KUBECTL_IN_VENUE: ""
+            # KUBEVIRT_INFRA_NODE_SELECTOR is the nodeSelector written into the KubeVirt
+            # CR's spec.infra.nodePlacement when the target cluster exposes NO node
+            # carrying node-role.kubernetes.io/control-plane|master — i.e. on every
+            # externally-managed cluster, where KubeVirt's required control-plane
+            # affinity can never be satisfied. One `key=value` pair.
+            KUBEVIRT_INFRA_NODE_SELECTOR: kubernetes.io/os=linux
         plan:
-            - run: wait for the k3s API server AND a Ready node IN-VENUE before any apply (the kubeconfig lands when k3s's apiserver starts, and the node registers moments later — the k3s-kernel candy may also reboot the guest; poll bounded, the helm-chart precedent, never a one-shot wait that errors on an empty node list)
+            # The venue's client + kubeconfig are resolved ONCE and published to a
+            # file the other steps source, so the resolution (and its loud failure)
+            # has exactly one implementation.
+            - run: resolve the venue's kubectl and kubeconfig, and publish them for the later steps
+              id: kubevirt-venue-env
+              command: |
+                  set -euo pipefail
+                  mkdir -p /var/lib/charly
+                  kubectl_bin="${KUBECTL_IN_VENUE:-}"
+                  if [ -z "${kubectl_bin}" ]; then
+                    kubectl_bin="$(command -v kubectl 2>/dev/null || true)"
+                  fi
+                  if [ -z "${kubectl_bin}" ] || [ ! -x "${kubectl_bin}" ]; then
+                    echo "no kubectl in this venue: set KUBECTL_IN_VENUE to one, or put kubectl on PATH" >&2
+                    exit 1
+                  fi
+                  # Every reference to a value the VENUE may not export carries a `:-` default:
+                  # the step runs under `set -u`, and an unset ambient $KUBECONFIG aborted the
+                  # whole install in the k3s guest with "KUBECONFIG: unbound variable"
+                  # (MEASURED: charly.check-kubevirt-operator, deploy-add, 2026-10-14).
+                  # A DECLARED path is taken as an answer; only a DISCOVERED one is tested for
+                  # existence. The distinction is load-bearing: on the k3s venue the declared
+                  # default /etc/rancher/k3s/k3s.yaml only APPEARS once the server first starts,
+                  # so `-s`-testing it here raced the k3s-server candy and aborted the whole
+                  # install (MEASURED: charly.check-kubevirt-operator, deploy-add, 2026-10-14).
+                  # Existence and readiness belong to the bounded wait in the next step, which
+                  # names the file when it times out.
+                  kubeconfig=""
+                  if [ -n "${KUBECONFIG_IN_VENUE:-}" ]; then
+                    kubeconfig="${KUBECONFIG_IN_VENUE}"
+                  elif [ -n "${KUBECONFIG:-}" ] && [ -s "${KUBECONFIG}" ]; then
+                    kubeconfig="${KUBECONFIG}"
+                  elif [ -s "${HOME:-/root}/.kube/config" ]; then
+                    kubeconfig="${HOME:-/root}/.kube/config"
+                  fi
+                  if [ -z "${kubeconfig}" ]; then
+                    echo "no kubeconfig in this venue: tried KUBECONFIG_IN_VENUE=${KUBECONFIG_IN_VENUE:-<unset>}, \$KUBECONFIG=${KUBECONFIG:-<unset>}, \${HOME}/.kube/config" >&2
+                    exit 1
+                  fi
+                  {
+                    printf 'export KUBECTL=%q\n' "${kubectl_bin}"
+                    printf 'export KUBECONFIG=%q\n' "${kubeconfig}"
+                  } > /var/lib/charly/kubevirt-venue.env
+                  echo "venue client: ${kubectl_bin}"
+                  echo "venue kubeconfig: ${kubeconfig}"
+              run_as: root
+              context: [deploy]
+            - run: wait for the venue's cluster API server AND a Ready node IN-VENUE before any apply (the kubeconfig lands when the API server starts, and the node registers moments later; a k3s guest may also reboot; poll bounded, the helm-chart precedent, never a one-shot wait that errors on an empty node list)
               id: kubevirt-apiserver-ready
               command: |
                   set -euo pipefail
-                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
+                  . /var/lib/charly/kubevirt-venue.env
                   deadline=$(( $(date +%s) + 420 ))
-                  until [ -s "${KUBECONFIG_IN_VENUE}" ] \
-                        && /usr/local/bin/kubectl get --raw /readyz >/dev/null 2>&1 \
-                        && [ "$(/usr/local/bin/kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ')" -ge 1 ]; do
+                  until [ -s "${KUBECONFIG}" ] \
+                        && "${KUBECTL}" get --raw /readyz >/dev/null 2>&1 \
+                        && [ "$("${KUBECTL}" get nodes --no-headers 2>/dev/null | grep -c ' Ready ')" -ge 1 ]; do
                     if [ "$(date +%s)" -ge "$deadline" ]; then
-                      echo "k3s apiserver/node did not become ready within 420s" >&2
-                      /usr/local/bin/kubectl get nodes -o wide 2>&1 || true
+                      echo "the venue's cluster API server / node did not become ready within 420s" >&2
+                      "${KUBECTL}" get nodes -o wide 2>&1 || true
                       exit 1
                     fi
                     sleep 2
                   done
+              run_as: root
+              context: [deploy]
+            - run: decide whether the target cluster can satisfy KubeVirt's required control-plane node affinity (no node carries the role label on an externally-managed cluster)
+              id: kubevirt-cluster-topology
+              command: |
+                  set -euo pipefail
+                  . /var/lib/charly/kubevirt-venue.env
+                  control_plane="$("${KUBECTL}" get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null | wc -l)"
+                  master="$("${KUBECTL}" get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null | wc -l)"
+                  labelled=$(( control_plane + master ))
+                  if [ "${labelled}" -eq 0 ]; then
+                    external=1
+                  else
+                    external=0
+                  fi
+                  printf 'export KUBEVIRT_EXTERNAL_CLUSTER=%s\n' "${external}" > /var/lib/charly/kubevirt-topology.env
+                  echo "nodes carrying node-role.kubernetes.io/control-plane|master: ${labelled} (external cluster: ${external})"
               run_as: root
               context: [deploy]
             - run: download the pinned KubeVirt operator + CR manifests into the venue
@@ -87,38 +188,99 @@ kubevirt-operator:
                   done
               run_as: root
               context: [deploy]
+            - run: normalize the fetched KubeVirt operator manifest for the cluster's node labels
+              id: kubevirt-manifest-normalize
+              command: |
+                  set -euo pipefail
+                  . /var/lib/charly/kubevirt-topology.env
+                  manifest=/var/lib/charly/kubevirt-operator.yaml
+                  if [ "${KUBEVIRT_EXTERNAL_CLUSTER}" = "1" ]; then
+                    # The virt-operator Deployment's REQUIRED control-plane/master
+                    # nodeAffinity can never be satisfied here, so the operator itself
+                    # would stay Pending forever. Strip exactly that block — asserted
+                    # in both directions so an upstream reformat fails loudly instead of
+                    # silently leaving an unschedulable Deployment. The 12 CRD-schema
+                    # occurrences of the same key (indent 30) are documentation and stay.
+                    before=$(grep -c '^          requiredDuringSchedulingIgnoredDuringExecution:$' "${manifest}" || true)
+                    if [ "${before}" != "1" ]; then
+                      echo "expected exactly ONE virt-operator required node-affinity block, found ${before}" >&2
+                      exit 1
+                    fi
+                    sed -i '/^          requiredDuringSchedulingIgnoredDuringExecution:$/,/^        podAntiAffinity:$/{/^        podAntiAffinity:$/!d}' "${manifest}"
+                    after=$(grep -c '^          requiredDuringSchedulingIgnoredDuringExecution:$' "${manifest}" || true)
+                    if [ "${after}" != "0" ]; then
+                      echo "failed to strip the virt-operator required node-affinity block (still ${after})" >&2
+                      exit 1
+                    fi
+                    echo "stripped the unsatisfiable required control-plane nodeAffinity from virt-operator (no node carries the role label)"
+                  fi
+                  # R1: the pinned manifest still names the `node-role.kubernetes.io/master`
+                  # label, REMOVED in Kubernetes 1.25 — `kubectl apply` prints a
+                  # deprecation WARNING, and a warning fails the zero-warning gate. v1.9.0
+                  # is the NEWEST release, so a repin cannot fix it. Rename it to the
+                  # canonical spelling. This is a WARNING fix only: on a cluster that
+                  # carries the label, the renamed selector also happens to schedule
+                  # correctly; on an externally-managed cluster the requirement is already
+                  # gone (above), so the rename changes no scheduling decision there.
+                  #
+                  # R1 (self-caught, 2026-10-14): I once deleted this line as "rewrites upstream
+                  # bytes for no scheduling decision" — I had measured the SCHEDULING effect (nil,
+                  # as the sentence above says) and inferred the purpose from it. The purpose is the
+                  # WARNING, and that one is unconditional on the manifest: on a cluster WITH the
+                  # labels the apply still warns, and a warning still fails the zero-warning gate
+                  # (this is what layer-kubevirt-operator#4 fixed). So the rewrite stays, and it
+                  # stays UNCONDITIONAL. Its scheduling effect really is nil — which is why the
+                  # strip ABOVE carries a two-sided assertion and this does not.
+                  sed -i 's|node-role\.kubernetes\.io/master|node-role.kubernetes.io/control-plane|g' "${manifest}"
+              run_as: root
+              context: [deploy]
             - run: apply the KubeVirt operator manifest against the venue's own kubeconfig, then wait for the operator rollout
               id: kubevirt-operator-apply
               command: |
                   set -euo pipefail
-                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
-                  # R1/R4a: the pinned KubeVirt v1.9.0 operator manifest still schedules
-                  # to the `node-role.kubernetes.io/master` label, REMOVED in Kubernetes
-                  # 1.25 — `kubectl apply` prints a deprecation WARNING (warnings=1, which
-                  # fails R10's zero-warning gate). v1.9.0 is the NEWEST release, so a
-                  # repin cannot fix it. Normalize the fetched manifest IN-VENUE to the
-                  # canonical `node-role.kubernetes.io/control-plane` before apply — a
-                  # semantics-preserving RENAME (the same node-affinity/toleration intent);
-                  # modern clusters carry only control-plane, so the renamed selector also
-                  # SCHEDULES correctly (the master spelling was a latent no-match).
-                  sed -i 's|node-role\.kubernetes\.io/master|node-role.kubernetes.io/control-plane|g' /var/lib/charly/kubevirt-operator.yaml
-                  /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-operator.yaml
-                  /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=300s deployment/virt-operator
+                  . /var/lib/charly/kubevirt-venue.env
+                  "${KUBECTL}" apply -f /var/lib/charly/kubevirt-operator.yaml
+                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=300s deployment/virt-operator
               run_as: root
               context: [deploy]
             - run: apply the KubeVirt CR, then wait for the KubeVirt control plane (the operator reconciles virt-api / virt-controller / virt-handler ASYNCHRONOUSLY after the CR — wait for each to EXIST first, then for its rollout, bounded)
               id: kubevirt-cr-apply
               command: |
                   set -euo pipefail
-                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
-                  /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-cr.yaml
+                  . /var/lib/charly/kubevirt-venue.env
+                  . /var/lib/charly/kubevirt-topology.env
+                  "${KUBECTL}" apply -f /var/lib/charly/kubevirt-cr.yaml
+                  if [ "${KUBEVIRT_EXTERNAL_CLUSTER}" = "1" ]; then
+                    # The operator injects its DEFAULT required control-plane affinity into
+                    # its install-strategy Job unless the CR carries spec.infra.nodePlacement
+                    # (measured). Declaring the placement suppresses that default, so the
+                    # Strategy Job — and every infra component — schedules on THIS cluster.
+                    sel_key="${KUBEVIRT_INFRA_NODE_SELECTOR%%=*}"
+                    sel_val="${KUBEVIRT_INFRA_NODE_SELECTOR#*=}"
+                    if [ -z "${sel_key}" ] || [ "${sel_val}" = "${KUBEVIRT_INFRA_NODE_SELECTOR}" ] || [ -z "${sel_val}" ]; then
+                      echo "KUBEVIRT_INFRA_NODE_SELECTOR must be one key=value pair, got '${KUBEVIRT_INFRA_NODE_SELECTOR}'" >&2
+                      exit 1
+                    fi
+                    "${KUBECTL}" -n kubevirt patch kubevirt kubevirt --type=merge \
+                      -p "{\"spec\":{\"infra\":{\"nodePlacement\":{\"nodeSelector\":{\"${sel_key}\":\"${sel_val}\"}}}}}"
+                    # A Job's pod template is immutable, so the Strategy Job the operator
+                    # already created under the upstream default must be RECREATED to pick
+                    # the placement up. Only not-yet-succeeded ones are touched.
+                    for job in $("${KUBECTL}" -n kubevirt get jobs -o name 2>/dev/null | grep 'virt-operator-install-strategy' || true); do
+                      succeeded=$("${KUBECTL}" -n kubevirt get "${job}" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)
+                      if [ -z "${succeeded}" ] || [ "${succeeded}" = "0" ]; then
+                        echo "recreating install-strategy job ${job} under the declared spec.infra.nodePlacement"
+                        "${KUBECTL}" -n kubevirt delete "${job}"
+                      fi
+                    done
+                  fi
                   # The operator creates the control-plane workloads after the CR; wait for
                   # each object to EXIST before waiting on its rollout (a one-shot wait on a
                   # not-yet-created Deployment errors "NotFound").
                   wait_for() { # kind name timeout
                     local kind="$1" name="$2" timeout="$3" deadline
                     deadline=$(( $(date +%s) + timeout ))
-                    until /usr/local/bin/kubectl -n kubevirt get "$kind" "$name" >/dev/null 2>&1; do
+                    until "${KUBECTL}" -n kubevirt get "$kind" "$name" >/dev/null 2>&1; do
                       if [ "$(date +%s)" -ge "$deadline" ]; then
                         echo "kubevirt $kind/$name did not appear within ${timeout}s" >&2
                         return 1
@@ -129,35 +291,35 @@ kubevirt-operator:
                   wait_for deployment virt-api 300
                   wait_for deployment virt-controller 300
                   wait_for daemonset virt-handler 420
-                  /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-api
-                  /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-controller
-                  /usr/local/bin/kubectl -n kubevirt rollout status --timeout=600s daemonset/virt-handler
+                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-api
+                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-controller
+                  "${KUBECTL}" -n kubevirt rollout status --timeout=600s daemonset/virt-handler
               run_as: root
               context: [deploy]
             - run: apply the CDI operator manifest (DataVolumes for VM image import)
               id: cdi-operator-apply
               command: |
                   set -euo pipefail
-                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
-                  /usr/local/bin/kubectl apply -f /var/lib/charly/cdi-operator.yaml
-                  /usr/local/bin/kubectl -n cdi wait --for=condition=Available --timeout=300s deployment/cdi-operator
+                  . /var/lib/charly/kubevirt-venue.env
+                  "${KUBECTL}" apply -f /var/lib/charly/cdi-operator.yaml
+                  "${KUBECTL}" -n cdi wait --for=condition=Available --timeout=300s deployment/cdi-operator
               run_as: root
               context: [deploy]
             - run: apply the CDI CR, then wait for the CDI control plane (the operator reconciles cdi-apiserver asynchronously — wait for EXISTENCE, then rollout, bounded)
               id: cdi-cr-apply
               command: |
                   set -euo pipefail
-                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
-                  /usr/local/bin/kubectl apply -f /var/lib/charly/cdi-cr.yaml
+                  . /var/lib/charly/kubevirt-venue.env
+                  "${KUBECTL}" apply -f /var/lib/charly/cdi-cr.yaml
                   deadline=$(( $(date +%s) + 600 ))
-                  until /usr/local/bin/kubectl -n cdi get deployment cdi-apiserver >/dev/null 2>&1; do
+                  until "${KUBECTL}" -n cdi get deployment cdi-apiserver >/dev/null 2>&1; do
                     if [ "$(date +%s)" -ge "$deadline" ]; then
                       echo "cdi deployment/cdi-apiserver did not appear within 600s" >&2
                       exit 1
                     fi
                     sleep 2
                   done
-                  /usr/local/bin/kubectl -n cdi wait --for=condition=Available --timeout=600s deployment/cdi-apiserver
+                  "${KUBECTL}" -n cdi wait --for=condition=Available --timeout=600s deployment/cdi-apiserver
               run_as: root
               context: [deploy]
             # ADE: the candy that installs the platform also asserts it is present
@@ -167,8 +329,8 @@ kubevirt-operator:
               id: kubevirt-installed
               command: |
                   set -euo pipefail
-                  export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
-                  /usr/local/bin/kubectl get crd virtualmachines.kubevirt.io >/dev/null
-                  /usr/local/bin/kubectl -n kubevirt get pods --no-headers | grep -q virt-api
+                  . /var/lib/charly/kubevirt-venue.env
+                  "${KUBECTL}" get crd virtualmachines.kubevirt.io >/dev/null
+                  "${KUBECTL}" -n kubevirt get pods --no-headers | grep -q virt-api
               run_as: root
               context: [runtime]
