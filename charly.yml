@@ -92,6 +92,16 @@ kubevirt-operator:
               command: |
                   set -euo pipefail
                   export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
+                  # R1/R4a: the pinned KubeVirt v1.9.0 operator manifest still schedules
+                  # to the `node-role.kubernetes.io/master` label, REMOVED in Kubernetes
+                  # 1.25 — `kubectl apply` prints a deprecation WARNING (warnings=1, which
+                  # fails R10's zero-warning gate). v1.9.0 is the NEWEST release, so a
+                  # repin cannot fix it. Normalize the fetched manifest IN-VENUE to the
+                  # canonical `node-role.kubernetes.io/control-plane` before apply — a
+                  # semantics-preserving RENAME (the same node-affinity/toleration intent);
+                  # modern clusters carry only control-plane, so the renamed selector also
+                  # SCHEDULES correctly (the master spelling was a latent no-match).
+                  sed -i 's|node-role\.kubernetes\.io/master|node-role.kubernetes.io/control-plane|g' /var/lib/charly/kubevirt-operator.yaml
                   /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-operator.yaml
                   /usr/local/bin/kubectl -n kubevirt wait --for=condition=Available --timeout=300s deployment/virt-operator
               run_as: root
