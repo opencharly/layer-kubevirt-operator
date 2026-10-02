@@ -112,6 +112,18 @@ kubevirt-operator:
                   set -euo pipefail
                   export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
                   /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-cr.yaml
+                  # KubeVirt v1.9 enables ALL Beta feature gates by default, including
+                  # `ImageVolume` (upstream kubevirt#17405). On a cluster without the k8s
+                  # ImageVolume feature (k3s < 1.35) ImageVolume's code path execs KubeVirt's
+                  # own `/usr/bin/container-disk` helper OUT of the containerDisk image, which
+                  # a plain containerDisk does not carry — the virt-launcher then dies with
+                  # `stat /container-disk-binary/usr/bin/container-disk: no such file or
+                  # directory` and the VM CrashLoops (upstream kubevirt#17460). Disable the
+                  # gate so KubeVirt uses the legacy init-container path that copies
+                  # `container-disk` from the virt-launcher image. (Also tracked: kubevirt v1.9
+                  # officially supports k8s 1.34+; the k3s node version is the longer-term fix.)
+                  /usr/local/bin/kubectl patch kubevirt kubevirt -n kubevirt --type merge \
+                    -p '{"spec":{"configuration":{"developerConfiguration":{"disabledFeatureGates":["ImageVolume"]}}}}'
                   # The operator creates the control-plane workloads after the CR; wait for
                   # each object to EXIST before waiting on its rollout (a one-shot wait on a
                   # not-yet-created Deployment errors "NotFound").
