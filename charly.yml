@@ -112,6 +112,20 @@ kubevirt-operator:
                   set -euo pipefail
                   export KUBECONFIG="${KUBECONFIG_IN_VENUE}"
                   /usr/local/bin/kubectl apply -f /var/lib/charly/kubevirt-cr.yaml
+                  # KubeVirt's `ImageVolume` feature gate is BETA (on by default since
+                  # v1.7.0) and makes virt-controller render a containerDisk's disk-pull
+                  # as an ImageVolume init container that execs
+                  # `/container-disk-binary/usr/bin/container-disk` against the
+                  # launcher-binary volume. On a cluster whose Kubernetes is too old for
+                  # the upstream `image` volume source (this bed's k3s is K8s v1.31, where
+                  # ImageVolume is alpha/off), that init has no binary to exec and every
+                  # containerDisk VMI crash-loops with `no such file or directory`.
+                  # Disable the gate so KubeVirt renders the pre-ImageVolume path, which
+                  # COPIES the binary from the launcher image into the pod
+                  # (pkg/virt-controller/services/template.go) — independent of the host
+                  # cluster's ImageVolume support. Idempotent.
+                  /usr/local/bin/kubectl -n kubevirt patch kubevirt kubevirt --type merge \
+                    -p '{"spec":{"configuration":{"developerConfiguration":{"disabledFeatureGates":["ImageVolume"]}}}}'
                   # The operator creates the control-plane workloads after the CR; wait for
                   # each object to EXIST before waiting on its rollout (a one-shot wait on a
                   # not-yet-created Deployment errors "NotFound").
