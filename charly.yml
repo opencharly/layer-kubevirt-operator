@@ -127,13 +127,15 @@ kubevirt-operator:
                     # all — a candy `var:` has no author-side override (`candy_vars` is the wire
                     # field the host passes the candy's own vars in).
                     kubeconfig="/home/${SUDO_USER}/.kube/config"
-                  elif [ -s /etc/rancher/k3s/k3s.yaml ]; then
-                    # A k3s venue SHIPS its own kubeconfig at this path — discovery, not a declared
-                    # default. It has to be discovery: a non-empty DEFAULT for KUBECONFIG_IN_VENUE
-                    # would shadow every arm below it, and a consumer cannot override a candy var
-                    # (`candy_vars` is the internal wire field the host passes the candy's own
-                    # `var:`s in, not an authored surface) — so a host venue reaching an external
-                    # cluster could not be pointed at its kubeconfig AT ALL (measured 2026-10-14).
+                  elif [ -d /etc/rancher/k3s ] || [ -e /etc/systemd/system/charly-k3s-server-k3s.service ] || command -v k3s >/dev/null 2>&1; then
+                    # A KUBE VENUE: the ANSWER is this path, not a discovery of it. The k3s server
+                    # writes its kubeconfig when it first starts, and this step runs BEFORE that —
+                    # so `-s`-testing it would race the server and abort the install (MEASURED:
+                    # this exact failure, twice: round 3 of the PR's history and again when the
+                    # declared default was emptied). Declared = an answer; discovered = tested.
+                    # Readiness for the FILE belongs to the next step's bounded wait, which names
+                    # it when it times out. The signals are the venue's own: k3s's config dir, the
+                    # k3s-server candy's unit, or the binary.
                     kubeconfig=/etc/rancher/k3s/k3s.yaml
                   fi
                   if [ -z "${kubeconfig}" ]; then
