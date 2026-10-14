@@ -72,7 +72,7 @@ kubevirt-operator:
             # is the k3s-server guest's own file; a host venue reaching an
             # externally-managed cluster points here (or leaves it to the venue's
             # ambient $KUBECONFIG / ~/.kube/config) via the composed deploy's env:.
-            KUBECONFIG_IN_VENUE: /etc/rancher/k3s/k3s.yaml
+            KUBECONFIG_IN_VENUE: ""
             # KUBECTL_IN_VENUE is the Kubernetes client the applies use. Empty → the
             # first `kubectl` on the venue's PATH (a k3s-server guest ships
             # /usr/local/bin/kubectl; a workstation installs kubectl normally).
@@ -118,9 +118,26 @@ kubevirt-operator:
                     kubeconfig="${KUBECONFIG}"
                   elif [ -s "${HOME:-/root}/.kube/config" ]; then
                     kubeconfig="${HOME:-/root}/.kube/config"
+                  elif [ -n "${SUDO_USER:-}" ] && [ -s "/home/${SUDO_USER}/.kube/config" ]; then
+                    # A host venue: this step runs AS ROOT on behalf of the operator, so sudo's
+                    # SUDO_USER names whose kubeconfig this is. Measured: a root step gets
+                    # HOME=/root, SUDO_USER=<the operator>, and NO $KUBECONFIG (env_reset), while
+                    # the operator's own ~/.kube/config is the venue's. Without this arm a host
+                    # venue reaching an external cluster could not be pointed at its kubeconfig at
+                    # all — a candy `var:` has no author-side override (`candy_vars` is the wire
+                    # field the host passes the candy's own vars in).
+                    kubeconfig="/home/${SUDO_USER}/.kube/config"
+                  elif [ -s /etc/rancher/k3s/k3s.yaml ]; then
+                    # A k3s venue SHIPS its own kubeconfig at this path — discovery, not a declared
+                    # default. It has to be discovery: a non-empty DEFAULT for KUBECONFIG_IN_VENUE
+                    # would shadow every arm below it, and a consumer cannot override a candy var
+                    # (`candy_vars` is the internal wire field the host passes the candy's own
+                    # `var:`s in, not an authored surface) — so a host venue reaching an external
+                    # cluster could not be pointed at its kubeconfig AT ALL (measured 2026-10-14).
+                    kubeconfig=/etc/rancher/k3s/k3s.yaml
                   fi
                   if [ -z "${kubeconfig}" ]; then
-                    echo "no kubeconfig in this venue: tried KUBECONFIG_IN_VENUE=${KUBECONFIG_IN_VENUE:-<unset>}, \$KUBECONFIG=${KUBECONFIG:-<unset>}, \${HOME}/.kube/config" >&2
+                    echo "no kubeconfig in this venue: tried KUBECONFIG_IN_VENUE=${KUBECONFIG_IN_VENUE:-<unset>}, \$KUBECONFIG=${KUBECONFIG:-<unset>}, \${HOME}/.kube/config, /home/\${SUDO_USER:-<no-sudo-user>}/.kube/config, /etc/rancher/k3s/k3s.yaml" >&2
                     exit 1
                   fi
                   {
