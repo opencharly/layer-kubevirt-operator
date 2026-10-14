@@ -268,7 +268,15 @@ kubevirt-operator:
                   set -euo pipefail
                   . /var/lib/charly/kubevirt-venue.env
                   "${KUBECTL}" apply -f /var/lib/charly/kubevirt-operator.yaml
-                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=300s deployment/virt-operator
+                  # Wait bounds. MEASURED on a disposable bed (2026-10-14): inside a NESTED venue
+                  # the platform's image pulls take minutes each (the virt-launcher pull alone was
+                  # observed at ~8m), and a 300s bound on virt-operator is marginal — a bed failed
+                  # here with `error: timed out waiting for the condition on deployments/virt-operator`
+                  # after the manifest had applied cleanly. 900s per object is the floor for a nested
+                  # venue; virt-handler's own rollout waits on the guest agent, which is the last thing
+                  # to appear. These are still CONSTANTS and the venue cannot tune them — the same gap
+                  # filed as plugin-kubevirt#28, not papered over here.
+                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=900s deployment/virt-operator
               run_as: root
               context: [deploy]
             - run: apply the KubeVirt CR, then wait for the KubeVirt control plane (the operator reconciles virt-api / virt-controller / virt-handler ASYNCHRONOUSLY after the CR — wait for each to EXIST first, then for its rollout, bounded)
@@ -319,9 +327,9 @@ kubevirt-operator:
                   wait_for deployment virt-api 300
                   wait_for deployment virt-controller 300
                   wait_for daemonset virt-handler 420
-                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-api
-                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=600s deployment/virt-controller
-                  "${KUBECTL}" -n kubevirt rollout status --timeout=600s daemonset/virt-handler
+                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=900s deployment/virt-api
+                  "${KUBECTL}" -n kubevirt wait --for=condition=Available --timeout=900s deployment/virt-controller
+                  "${KUBECTL}" -n kubevirt rollout status --timeout=900s daemonset/virt-handler
               run_as: root
               context: [deploy]
             - run: apply the CDI operator manifest (DataVolumes for VM image import)
@@ -330,7 +338,7 @@ kubevirt-operator:
                   set -euo pipefail
                   . /var/lib/charly/kubevirt-venue.env
                   "${KUBECTL}" apply -f /var/lib/charly/cdi-operator.yaml
-                  "${KUBECTL}" -n cdi wait --for=condition=Available --timeout=300s deployment/cdi-operator
+                  "${KUBECTL}" -n cdi wait --for=condition=Available --timeout=900s deployment/cdi-operator
               run_as: root
               context: [deploy]
             - run: apply the CDI CR, then wait for the CDI control plane (the operator reconciles cdi-apiserver asynchronously — wait for EXISTENCE, then rollout, bounded)
@@ -347,7 +355,7 @@ kubevirt-operator:
                     fi
                     sleep 2
                   done
-                  "${KUBECTL}" -n cdi wait --for=condition=Available --timeout=600s deployment/cdi-apiserver
+                  "${KUBECTL}" -n cdi wait --for=condition=Available --timeout=900s deployment/cdi-apiserver
               run_as: root
               context: [deploy]
             # ADE: the candy that installs the platform also asserts it is present
