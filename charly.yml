@@ -191,8 +191,15 @@ kubevirt-operator:
                   set -euo pipefail
                   mkdir -p /var/lib/charly
                   base="https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}"
+                  # FETCH EVERY RUN, unconditionally. A reused file is not the same input:
+                  # this candy MUTATES kubevirt-operator.yaml in place (the external-cluster
+                  # strip below), so `[ -s ... ] || curl` made a second run on the same venue
+                  # feed the transform an already-transformed artifact — and the strip's own
+                  # "exactly ONE block" assertion then failed with `found 0`. MEASURED on a
+                  # fresh cluster: the venue's /var/lib/charly persisted from an earlier run.
+                  # Deterministic input is the fix; a cache here buys seconds and costs a run.
                   for f in kubevirt-operator.yaml kubevirt-cr.yaml; do
-                    [ -s "/var/lib/charly/$f" ] || curl -fsSL -o "/var/lib/charly/$f" "$base/$f"
+                    curl -fsSL -o "/var/lib/charly/$f" "$base/$f"
                   done
               run_as: root
               context: [deploy]
@@ -203,7 +210,9 @@ kubevirt-operator:
                   mkdir -p /var/lib/charly
                   base="https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}"
                   for f in cdi-operator.yaml cdi-cr.yaml; do
-                    [ -s "/var/lib/charly/$f" ] || curl -fsSL -o "/var/lib/charly/$f" "$base/$f"
+                    # Fetched every run for the same reason as the KubeVirt manifests above:
+                    # a reused file is a different input, and determinism beats a cache here.
+                    curl -fsSL -o "/var/lib/charly/$f" "$base/$f"
                   done
               run_as: root
               context: [deploy]
